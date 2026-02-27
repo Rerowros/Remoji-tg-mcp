@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.env
+
+# Telegram session files (CRITICAL: DO NOT COMMIT)
+*.session
+*.session-journal
+
+# Downloaded media
+downloads/
+
+# VS Code
+.vscode/
+mcp.json
