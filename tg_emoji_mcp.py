@@ -202,14 +202,15 @@ async def start_web_server():
     await runner.setup()
     
     # Порт 0 заставляет ОС автоматически выдать любой свободный порт
-    site = web.TCPSite(runner, 'localhost', 0)
+    # Используем 127.0.0.1 вместо localhost для обхода проблем с VPN
+    site = web.TCPSite(runner, '127.0.0.1', 0)
     await site.start()
     
     # Получаем порт, который выдала ОС
     web_server_port = site._server.sockets[0].getsockname()[1]
     web_app_runner = runner
     
-    return f"http://localhost:{web_server_port}/index.html"
+    return f"http://127.0.0.1:{web_server_port}/index.html"
 
 @mcp.tool()
 async def search_and_select_emoji(
@@ -356,7 +357,7 @@ async def search_and_select_emoji(
             if not web_app_runner:
                 url = await start_web_server()
             else:
-                url = f"http://localhost:{web_server_port}/index.html"
+                url = f"http://127.0.0.1:{web_server_port}/index.html"
                 
             # Открываем браузер
             webbrowser.open(url)
