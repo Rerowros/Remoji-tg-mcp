@@ -1,8 +1,0 @@
-README.md
-pyproject.toml
-remoji_tg_mcp.egg-info/PKG-INFO
-remoji_tg_mcp.egg-info/SOURCES.txt
-remoji_tg_mcp.egg-info/dependency_links.txt
-remoji_tg_mcp.egg-info/entry_points.txt
-remoji_tg_mcp.egg-info/requires.txt
-remoji_tg_mcp.egg-info/top_level.txt
