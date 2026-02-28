@@ -29,7 +29,7 @@ from dotenv import load_dotenv, set_key
 from platformdirs import user_data_dir
 
 # Текущая версия
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 PACKAGE_NAME = "remoji-tg-mcp"
 
 # --- Настройка путей ---
@@ -49,8 +49,7 @@ if sys.platform == "win32":
             sys.stderr.reconfigure(encoding='utf-8')
         if hasattr(sys.stdout, 'reconfigure'):
             sys.stdout.reconfigure(encoding='utf-8')
-    except Exception:
-        pass
+    except Exception: pass
 
 # Настройка логирования
 logger = logging.getLogger("tg-emoji-mcp")
@@ -70,6 +69,7 @@ selected_emoji_future = None
 config_update_future = None
 web_app_runner = None
 web_server_port = None
+_update_checked = False # Флаг, чтобы проверять обновление только 1 раз за сессию
 
 auth_session = {
     "client": None, "phone": None, "phone_code_hash": None,
@@ -96,6 +96,9 @@ def get_tg_client():
     return Client(SESSION_FILE, api_id=int(api_id), api_hash=api_hash, password=pw, device_model="MCP Server")
 
 async def check_for_updates():
+    global _update_checked
+    if _update_checked: return
+    _update_checked = True
     try:
         async with ClientSession() as s:
             async with s.get(f"https://pypi.org/pypi/{PACKAGE_NAME}/json", timeout=3) as r:
@@ -128,7 +131,9 @@ async def ensure_authorized():
         if any(x in str(e) for x in ["AUTH_KEY_UNREGISTERED", "SESSION_REVOKED", "SESSION_EXPIRED"]):
             for ext in [".session", ".session-journal"]:
                 path = SESSION_FILE + ext
-                if os.path.exists(path): os.remove(path)
+                if os.path.exists(path):
+                    try: os.remove(path)
+                    except: pass
         auth_session.update({"step": "config", "error": f"Ошибка: {e}"})
         await open_auth_page(); return False
     finally:
@@ -148,12 +153,12 @@ async def handle_auth_get(request):
     forms = {
         "config": '<h2>1. API Ключи</h2><p style="color:#94a3b8;font-size:12px">Данные сохранятся в AppData</p><form action="/auth/config" method="post"><label>API ID</label><input type="text" name="api_id" required><label>API HASH</label><input type="text" name="api_hash" required><button class="btn">Сохранить</button></form>',
         "phone": '<h2>2. Телефон</h2><form action="/auth/phone" method="post"><label>Номер телефона</label><input type="text" name="phone" placeholder="+7..." required autofocus><button class="btn">Получить код</button></form>',
-        "code": '<h2>3. Код</h2><form action="/auth/code" method="post"><label>Код из Telegram</label><input type="text" name="code" required autofocus><button class="btn">Войти</button></form>',
-        "password": '<h2>4. Пароль</h2><form action="/auth/password" method="post"><label>Пароль (2FA)</label><input type="password" name="password" required autofocus><button class="btn">Подтвердить</button></form>',
+        "code": '<h2>3. Код подтверждения</h2><form action="/auth/code" method="post"><label>Код из Telegram</label><input type="text" name="code" required autofocus><button class="btn">Войти</button></form>',
+        "password": '<h2>4. Облачный пароль</h2><form action="/auth/password" method="post"><label>Пароль (2FA)</label><input type="password" name="password" required autofocus><button class="btn">Подтвердить</button></form>',
         "done": '<h2>✅ Успешно!</h2><p>Вы вошли. Можно закрыть вкладку.</p>'
     }
     content = forms.get(s, forms["config"])
-    return web.Response(text=f'<!DOCTYPE html><html><head><meta charset="utf-8"><title>Auth</title><style>body{{font-family:sans-serif;background:#0f172a;color:white;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}}.container{{background:#1e293b;padding:40px;border-radius:20px;width:350px;border:1px solid #334155}}label{{display:block;margin:15px 0 5px;color:#94a3b8;font-size:14px}}input{{width:100%;padding:12px;background:#0f172a;border:1px solid #334155;border-radius:10px;color:white;box-sizing:border-box;font-size:16px}}.btn{{width:100%;background:#0284c7;color:white;border:none;padding:15px;border-radius:10px;margin-top:20px;cursor:pointer;font-weight:bold}}</style></head><body><div class="container">{err_html}{content}</div></body></html>', content_type='text/html')
+    return web.Response(text=f'<!DOCTYPE html><html><head><meta charset="utf-8"><title>Auth</title><style>body{{font-family:sans-serif;background:#0f172a;color:white;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}}.container{{background:#1e293b;padding:40px;border-radius:20px;width:350px;box-shadow:0 20px 50px rgba(0,0,0,0.5);border:1px solid #334155}}label{{display:block;margin:15px 0 5px;color:#94a3b8;font-size:14px}}input{{width:100%;padding:12px;background:#0f172a;border:1px solid #334155;border-radius:10px;color:white;box-sizing:border-box;font-size:16px}}.btn{{width:100%;background:#0284c7;color:white;border:none;padding:15px;border-radius:10px;margin-top:20px;cursor:pointer;font-weight:bold}}</style></head><body><div class="container">{err_html}{content}</div></body></html>', content_type='text/html')
 
 async def handle_auth_config(request):
     d = await request.post(); aid, ah = str(d.get('api_id','')).strip(), str(d.get('api_hash','')).strip()
@@ -199,7 +204,7 @@ async def handle_auth_password(request):
     except Exception as e: auth_session["error"] = str(e)
     return web.HTTPFound('/auth')
 
-# --- MCP Logic ---
+# --- Logic ---
 
 async def start_web_server():
     global web_app_runner, web_server_port
@@ -264,7 +269,8 @@ async def search_and_select_emoji(emoticons: list[str], limit: int = 10, pack_na
             webbrowser.open(f"{base}/static/index.html")
             selected_emoji_future = asyncio.Future()
             try:
-                res = await (await asyncio.wait_for(selected_emoji_future, 300.0))
+                res_task = await asyncio.wait_for(selected_emoji_future, 300.0)
+                res = await res_task
                 cleanup_downloads(); return {"status": "success", "selected_emojis": res.get("selections", [])}
             except: return {"error": "Таймаут"}
         except Exception as e: return {"error": str(e)}
