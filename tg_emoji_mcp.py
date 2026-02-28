@@ -13,13 +13,18 @@ import gzip
 import webbrowser
 import logging
 import sys
-from aiohttp import web
+import json
+from aiohttp import web, ClientSession
 from mcp.server.fastmcp import FastMCP
 from pyrogram import Client
 from pyrogram.raw.functions.messages import SearchCustomEmoji, GetCustomEmojiDocuments
 from pyrogram.raw.types import EmojiList
 from pyrogram.file_id import FileId, FileType
 from dotenv import load_dotenv, set_key
+
+# Текущая версия
+VERSION = "0.1.3"
+PACKAGE_NAME = "remoji-tg-mcp"
 
 # Настройка логирования в stderr, чтобы не засорять stdout (используется MCP)
 logging.basicConfig(
@@ -59,16 +64,42 @@ auth_session = {
     "error": None
 }
 
+async def check_for_updates():
+    """Проверяет наличие новой версии на PyPI"""
+    try:
+        async with ClientSession() as session:
+            async with session.get(f"https://pypi.org/pypi/{PACKAGE_NAME}/json", timeout=5) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    latest_version = data["info"]["version"]
+                    if latest_version != VERSION:
+                        logger.warning(f"\n" + "!"*40 + 
+                                     f"\nНОВАЯ ВЕРСИЯ ДОСТУПНА: {latest_version} (у вас {VERSION})" +
+                                     f"\nОбновите командой: uv tool upgrade {PACKAGE_NAME}" +
+                                     f"\n" + "!"*40)
+                    else:
+                        logger.info(f"Версия актуальна: {VERSION}")
+    except Exception as e:
+        logger.debug(f"Ошибка проверки обновлений: {e}")
+
 def get_tg_client():
-    """Создает и возвращает клиент Pyrogram, проверяя наличие ключей"""
+    """Создает и возвращает клиент Pyrogram, используя пароль для шифрования сессии, если он есть"""
     api_id = os.environ.get("TG_API_ID")
     api_hash = os.environ.get("TG_API_HASH")
+    session_password = os.environ.get("SESSION_PASSWORD") # Можно добавить в .env для защиты .session файла
     
     if not api_id or not api_hash:
         return None
         
     try:
-        return Client("user_session", api_id=int(api_id), api_hash=api_hash, device_model="MCP Server")
+        # Если задан SESSION_PASSWORD, файл user_session.session будет зашифрован
+        return Client(
+            "user_session", 
+            api_id=int(api_id), 
+            api_hash=api_hash, 
+            password=session_password, 
+            device_model="MCP Server"
+        )
     except (ValueError, TypeError):
         return None
 
@@ -540,6 +571,9 @@ async def search_and_select_emoji(
     """
     global selected_emoji_future, config_update_future, web_app_runner, web_server_port
     
+    # Проверка обновлений при первом вызове инструмента
+    await check_for_updates()
+    
     # Проверяем авторизацию
     if not await ensure_authorized():
         try:
@@ -718,6 +752,9 @@ async def search_emoji_auto(
         Dictionary containing a list of matching emojis with their IDs and metadata.
     """
     global config_update_future
+    
+    # Проверка обновлений
+    await check_for_updates()
     
     if not await ensure_authorized():
         try:
