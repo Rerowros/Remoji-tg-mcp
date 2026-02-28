@@ -11,6 +11,8 @@ import pyrogram
 import os
 import gzip
 import webbrowser
+import logging
+import sys
 from aiohttp import web
 from mcp.server.fastmcp import FastMCP
 from pyrogram import Client
@@ -19,16 +21,43 @@ from pyrogram.raw.types import EmojiList
 from pyrogram.file_id import FileId, FileType
 from dotenv import load_dotenv, set_key
 
+# Настройка логирования в stderr, чтобы не засорять stdout (используется MCP)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stderr
+)
+
+# Отключаем баннер Pyrogram и другие шумные логи
+logging.getLogger("pyrogram").setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.WARNING)
+logging.getLogger("aiohttp").setLevel(logging.WARNING)
+
+logger = logging.getLogger("tg-emoji-mcp")
+
 # Загружаем переменные окружения из .env
 load_dotenv()
 
 # Инициализация MCP сервера
 mcp = FastMCP("TelegramEmojiSearch")
 
-# Получаем ключи
-TG_API_ID = os.environ.get("TG_API_ID")
-TG_API_HASH = os.environ.get("TG_API_HASH")
+# Константы
 ENV_FILE = ".env"
+
+# Глобальные переменные для управления состоянием авторизации и веб-сервера
+selected_emoji_future = None
+config_update_future = None
+web_app_runner = None
+web_server_port = None
+
+# Состояние процесса входа в Telegram
+auth_session = {
+    "client": None,
+    "phone": None,
+    "phone_code_hash": None,
+    "step": "config", # config -> phone -> code -> password (optional) -> done
+    "error": None
+}
 
 def get_tg_client():
     """Создает и возвращает клиент Pyrogram, проверяя наличие ключей"""
@@ -39,9 +68,207 @@ def get_tg_client():
         return None
         
     try:
-        return Client("user_session", api_id=int(api_id), api_hash=api_hash)
+        return Client("user_session", api_id=int(api_id), api_hash=api_hash, device_model="MCP Server")
     except (ValueError, TypeError):
         return None
+
+async def ensure_authorized():
+    """Проверяет авторизацию и запускает веб-интерфейс для входа, если нужно"""
+    global config_update_future, auth_session
+    
+    client = get_tg_client()
+    if not client:
+        auth_session["step"] = "config"
+        await open_auth_page()
+        return False
+
+    try:
+        await client.connect()
+        if await client.get_me():
+            await client.disconnect()
+            return True
+        else:
+            auth_session["step"] = "phone"
+            auth_session["client"] = client
+            await open_auth_page()
+            return False
+    except Exception as e:
+        logger.error(f"Auth check error: {e}")
+        auth_session["step"] = "config"
+        await open_auth_page()
+        return False
+    finally:
+        if client.is_connected:
+            await client.disconnect()
+
+async def open_auth_page():
+    """Открывает страницу авторизации в браузере"""
+    global web_app_runner, web_server_port, config_update_future
+    
+    if not web_app_runner:
+        base_url = await start_web_server()
+    else:
+        base_url = f"http://127.0.0.1:{web_server_port}"
+        
+    webbrowser.open(f"{base_url}/auth")
+    
+    if not config_update_future or config_update_future.done():
+        config_update_future = asyncio.Future()
+
+async def handle_auth_get(request):
+    """Отображает страницу авторизации в зависимости от текущего шага"""
+    step = auth_session["step"]
+    error_msg = f'<p style="color: #ff4d4d;">Error: {auth_session["error"]}</p>' if auth_session["error"] else ""
+    
+    content = ""
+    if step == "config":
+        content = """
+            <h2>1. Настройка API</h2>
+            <form action="/auth/config" method="post">
+                <div class="form-group">
+                    <label>API ID</label>
+                    <input type="text" name="api_id" placeholder="1234567" required>
+                </div>
+                <div class="form-group">
+                    <label>API HASH</label>
+                    <input type="text" name="api_hash" placeholder="abc123def..." required>
+                </div>
+                <button type="submit" class="btn">Сохранить</button>
+            </form>
+        """
+    elif step == "phone":
+        content = """
+            <h2>2. Номер телефона</h2>
+            <form action="/auth/phone" method="post">
+                <div class="form-group">
+                    <label>Телефон (в международном формате)</label>
+                    <input type="text" name="phone" placeholder="+79991234567" required>
+                </div>
+                <button type="submit" class="btn">Отправить код</button>
+            </form>
+        """
+    elif step == "code":
+        content = """
+            <h2>3. Код подтверждения</h2>
+            <form action="/auth/code" method="post">
+                <div class="form-group">
+                    <label>Код из Telegram</label>
+                    <input type="text" name="code" placeholder="12345" required>
+                </div>
+                <button type="submit" class="btn">Войти</button>
+            </form>
+        """
+    elif step == "password":
+        content = """
+            <h2>4. Двухфакторная аутентификация</h2>
+            <form action="/auth/password" method="post">
+                <div class="form-group">
+                    <label>Облачный пароль</label>
+                    <input type="password" name="password" required>
+                </div>
+                <button type="submit" class="btn">Подтвердить</button>
+            </form>
+        """
+    else:
+        content = "<h2>✅ Авторизация успешна!</h2><p>Теперь вы можете использовать MCP инструменты. Эту вкладку можно закрыть.</p>"
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>Telegram Auth</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; background-color: #1e1e1e; color: white; padding: 40px; display: flex; justify-content: center; }}
+            .container {{ background: #2d2d2d; padding: 30px; border-radius: 10px; width: 400px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }}
+            h2 {{ margin-top: 0; color: #4da6ff; }}
+            .form-group {{ margin-bottom: 20px; }}
+            label {{ display: block; margin-bottom: 5px; color: #aaa; }}
+            input {{ width: 100%; padding: 10px; background: #1e1e1e; border: 1px solid #444; border-radius: 5px; color: white; box-sizing: border-box; }}
+            .btn {{ background: #4da6ff; color: white; border: none; padding: 12px; width: 100%; border-radius: 5px; cursor: pointer; font-weight: bold; margin-top: 10px; }}
+            .btn:hover {{ background: #3d8fdf; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            {error_msg}
+            {content}
+        </div>
+    </body>
+    </html>
+    """
+    return web.Response(text=html, content_type='text/html')
+
+async def handle_auth_config(request):
+    data = await request.post()
+    api_id = data.get('api_id')
+    api_hash = data.get('api_hash')
+    if api_id and api_hash:
+        set_key(ENV_FILE, "TG_API_ID", str(api_id))
+        set_key(ENV_FILE, "TG_API_HASH", str(api_hash))
+        os.environ["TG_API_ID"] = str(api_id)
+        os.environ["TG_API_HASH"] = str(api_hash)
+        auth_session["step"] = "phone"
+        auth_session["error"] = None
+        auth_session["client"] = get_tg_client()
+    return web.HTTPFound('/auth')
+
+async def handle_auth_phone(request):
+    data = await request.post()
+    phone = data.get('phone')
+    if phone:
+        auth_session["phone"] = phone
+        client = auth_session["client"]
+        try:
+            await client.connect()
+            code_obj = await client.send_code(phone)
+            auth_session["phone_code_hash"] = code_obj.phone_code_hash
+            auth_session["step"] = "code"
+            auth_session["error"] = None
+        except Exception as e:
+            auth_session["error"] = str(e)
+        finally:
+            await client.disconnect()
+    return web.HTTPFound('/auth')
+
+async def handle_auth_code(request):
+    data = await request.post()
+    code = data.get('code')
+    if code:
+        client = auth_session["client"]
+        try:
+            await client.connect()
+            await client.sign_in(auth_session["phone"], auth_session["phone_code_hash"], code)
+            auth_session["step"] = "done"
+            auth_session["error"] = None
+            if config_update_future and not config_update_future.done():
+                config_update_future.set_result(True)
+        except pyrogram.errors.SessionPasswordNeeded:
+            auth_session["step"] = "password"
+            auth_session["error"] = None
+        except Exception as e:
+            auth_session["error"] = str(e)
+        finally:
+            await client.disconnect()
+    return web.HTTPFound('/auth')
+
+async def handle_auth_password(request):
+    data = await request.post()
+    password = data.get('password')
+    if password:
+        client = auth_session["client"]
+        try:
+            await client.connect()
+            await client.check_password(password)
+            auth_session["step"] = "done"
+            auth_session["error"] = None
+            if config_update_future and not config_update_future.done():
+                config_update_future.set_result(True)
+        except Exception as e:
+            auth_session["error"] = str(e)
+        finally:
+            await client.disconnect()
+    return web.HTTPFound('/auth')
 
 def generate_html_viewer(downloaded_files, output_path="downloads/index.html"):
     """Генерирует HTML файл для удобного просмотра скачанных эмодзи в браузере"""
@@ -226,79 +453,6 @@ def generate_html_viewer(downloaded_files, output_path="downloads/index.html"):
         f.write(html_content)
     return os.path.abspath(output_path)
 
-# Глобальные переменные для хранения выбранного эмодзи и статуса конфига
-selected_emoji_future = None
-config_update_future = None
-web_app_runner = None
-web_server_port = None
-
-async def handle_config_get(request):
-    """Отображает страницу настройки API"""
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>Telegram API Setup</title>
-        <style>
-            body { font-family: Arial, sans-serif; background-color: #1e1e1e; color: white; padding: 40px; display: flex; justify-content: center; }
-            .container { background: #2d2d2d; padding: 30px; border-radius: 10px; width: 400px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
-            h2 { margin-top: 0; color: #4da6ff; }
-            .form-group { margin-bottom: 20px; }
-            label { display: block; margin-bottom: 5px; color: #aaa; }
-            input { width: 100%; padding: 10px; background: #1e1e1e; border: 1px solid #444; border-radius: 5px; color: white; box-sizing: border-box; }
-            .btn { background: #4da6ff; color: white; border: none; padding: 12px; width: 100%; border-radius: 5px; cursor: pointer; font-weight: bold; margin-top: 10px; }
-            .btn:hover { background: #3d8fdf; }
-            .info { font-size: 13px; color: #888; margin-top: 15px; line-height: 1.4; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h2>Настройка Telegram API</h2>
-            <form action="/config" method="post">
-                <div class="form-group">
-                    <label>API ID</label>
-                    <input type="text" name="api_id" placeholder="Например: 1234567" required>
-                </div>
-                <div class="form-group">
-                    <label>API HASH</label>
-                    <input type="text" name="api_hash" placeholder="Например: abc123def456..." required>
-                </div>
-                <button type="submit" class="btn">Сохранить и продолжить</button>
-            </form>
-            <div class="info">
-                Получить API ID и API HASH можно на сайте <a href="https://my.telegram.org/apps" target="_blank" style="color: #4da6ff;">my.telegram.org</a>.
-                Эти данные будут сохранены локально в файле .env.
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-    return web.Response(text=html, content_type='text/html')
-
-async def handle_config_post(request):
-    """Обрабатывает сохранение конфига"""
-    global config_update_future
-    data = await request.post()
-    api_id = data.get('api_id')
-    api_hash = data.get('api_hash')
-    
-    if api_id and api_hash:
-        # Сохраняем в .env
-        set_key(ENV_FILE, "TG_API_ID", str(api_id))
-        set_key(ENV_FILE, "TG_API_HASH", str(api_hash))
-        
-        # Обновляем переменные окружения в текущем процессе
-        os.environ["TG_API_ID"] = str(api_id)
-        os.environ["TG_API_HASH"] = str(api_hash)
-        
-        if config_update_future and not config_update_future.done():
-            config_update_future.set_result(True)
-            
-        return web.Response(text="<h1>Настройки сохранены!</h1><p>Вы можете закрыть эту вкладку, MCP сервер сейчас продолжит работу.</p><script>setTimeout(()=>window.close(), 3000)</script>", content_type='text/html')
-    
-    return web.Response(status=400, text="Invalid data")
-
 async def handle_selection(request):
     """Обработчик POST запроса от браузера с выбранными эмодзи"""
     global selected_emoji_future
@@ -340,9 +494,12 @@ async def start_web_server():
     app.router.add_post('/select', handle_selection)
     app.router.add_options('/select', handle_options)
     
-    # Роуты для конфигурации
-    app.router.add_get('/config', handle_config_get)
-    app.router.add_post('/config', handle_config_post)
+    # Роуты для авторизации
+    app.router.add_get('/auth', handle_auth_get)
+    app.router.add_post('/auth/config', handle_auth_config)
+    app.router.add_post('/auth/phone', handle_auth_phone)
+    app.router.add_post('/auth/code', handle_auth_code)
+    app.router.add_post('/auth/password', handle_auth_password)
     
     # Редирект с корня на index.html
     async def index_redir(request):
@@ -383,29 +540,14 @@ async def search_and_select_emoji(
     """
     global selected_emoji_future, config_update_future, web_app_runner, web_server_port
     
-    # Проверяем наличие конфигурации
-    app = get_tg_client()
-    if not app:
-        # Запускаем сервер если еще не запущен
-        if not web_app_runner:
-            base_url = await start_web_server()
-        else:
-            base_url = f"http://127.0.0.1:{web_server_port}"
-            
-        # Открываем страницу конфига
-        webbrowser.open(f"{base_url}/config")
-        
-        # Ждем обновления конфига
-        config_update_future = asyncio.Future()
+    # Проверяем авторизацию
+    if not await ensure_authorized():
         try:
-            await asyncio.wait_for(config_update_future, timeout=300.0)
-            app = get_tg_client()
-            if not app:
-                return {"error": "Failed to initialize Telegram client after config update"}
+            await asyncio.wait_for(config_update_future, timeout=600.0)
         except asyncio.TimeoutError:
-            return {"error": "Timeout waiting for API configuration"}
+            return {"error": "Timeout waiting for authorization"}
 
-    # Запускаем клиент, если он еще не запущен
+    app = get_tg_client()
     async with app:
         try:
             all_doc_ids = []
@@ -422,13 +564,9 @@ async def search_and_select_emoji(
                     if isinstance(result, EmojiList) and result.document_id:
                         all_doc_ids.extend(result.document_id[:limit])
                 except pyrogram.errors.Unauthorized:
-                    # Если ключ неверный, просим перенастроить
-                    if not web_app_runner:
-                        base_url = await start_web_server()
-                    else:
-                        base_url = f"http://127.0.0.1:{web_server_port}"
-                    webbrowser.open(f"{base_url}/config")
-                    return {"error": "Telegram API credentials are invalid. Please update them in the opened browser window and try again."}
+                    auth_session["step"] = "phone"
+                    await open_auth_page()
+                    return {"error": "Telegram session expired. Please re-authorize in the opened browser window."}
             
             if not all_doc_ids:
                 return {"error": "No emojis found for the given base emoticons"}
@@ -510,7 +648,7 @@ async def search_and_select_emoji(
                     if downloaded_file:
                         local_path = os.path.abspath(downloaded_file)
                 except Exception as e:
-                    print(f"Download error {doc.id}: {e}")
+                    logger.error(f"Download error {doc.id}: {e}")
                         
                 emoji_details.append({
                     "id": str(doc.id),
@@ -579,26 +717,15 @@ async def search_emoji_auto(
     Returns:
         Dictionary containing a list of matching emojis with their IDs and metadata.
     """
-    global web_app_runner, web_server_port, config_update_future
+    global config_update_future
+    
+    if not await ensure_authorized():
+        try:
+            await asyncio.wait_for(config_update_future, timeout=600.0)
+        except asyncio.TimeoutError:
+            return {"error": "Timeout waiting for authorization"}
     
     app = get_tg_client()
-    if not app:
-        # Просим настроить API
-        if not web_app_runner:
-            base_url = await start_web_server()
-        else:
-            base_url = f"http://127.0.0.1:{web_server_port}"
-        webbrowser.open(f"{base_url}/config")
-        
-        config_update_future = asyncio.Future()
-        try:
-            await asyncio.wait_for(config_update_future, timeout=300.0)
-            app = get_tg_client()
-            if not app:
-                return {"error": "API not configured"}
-        except asyncio.TimeoutError:
-            return {"error": "Timeout waiting for API configuration"}
-    
     async with app:
         try:
             all_doc_ids = []
@@ -611,7 +738,7 @@ async def search_emoji_auto(
                     if isinstance(result, EmojiList) and result.document_id:
                         all_doc_ids.extend(result.document_id[:limit])
                 except pyrogram.errors.Unauthorized:
-                    return {"error": "Invalid API credentials. Please run search_and_select_emoji to update them."}
+                    return {"error": "Session expired. Run search_and_select_emoji to re-authorize."}
             
             if not all_doc_ids:
                 return {"error": "No emojis found"}
