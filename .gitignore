@@ -1,20 +1,28 @@
-# Python
+# Сборка и пакеты
+dist/
+build/
+*.egg-info/
+*.spec
+
+# Виртуальные окружения
+venv/
+.venv/
+env/
+
+# Кэш Python
 __pycache__/
 *.py[cod]
 *$py.class
 
-# Virtual environments
-venv/
-env/
+# Локальные данные и секреты
 .env
-
-# Telegram session files (CRITICAL: DO NOT COMMIT)
-*.session
-*.session-journal
-
-# Downloaded media
 downloads/
+user_session.session
+user_session.session-journal
 
-# VS Code
+# Логи
+*.log
+
+# IDE
 .vscode/
-mcp.json
+.idea/
