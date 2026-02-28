@@ -29,8 +29,8 @@ from pyrogram.file_id import FileId, FileType
 from dotenv import load_dotenv, set_key
 from platformdirs import user_data_dir
 
-# Version 0.4.2 - Fix JS error, restore JSON headers, enhance animation prompt
-VERSION = "0.4.2"
+# Version 0.4.4 - High-speed parallel search and download
+VERSION = "0.4.4"
 PACKAGE_NAME = "remoji-tg-mcp"
 
 # --- Paths ---
@@ -220,61 +220,91 @@ async def search_and_select_emoji(
     is_animated: bool = None
 ) -> dict:
     """
-    Search for Telegram emojis with interactive UI. set is_animated=True if user ask "animated".
-    IMPORTANT: Use Unicode emoji symbols ONLY (e.g. ❌, 🔥). NO TEXT NAMES.
+    Interactive search for Telegram emojis.
+    Args:
+        emoticons: List of symbols (e.g. 🔥, 💎). CRITICAL: NO TEXT NAMES.
+        limit: Max results per symbol (max 50).
+        is_animated: Set to True for animated/video stickers. HIGHLY RECOMMENDED.
     """
     global selected_emoji_future
     cleanup_downloads(); await check_for_updates()
     if not await ensure_authorized() and not await wait_for_auth(): return {"error": "Auth failed"}
+    
     app = get_tg_client()
     async with app:
         try:
-            ids = []
-            for em in emoticons:
+            # 1. Parallel search for all emoticons
+            async def search_one(em):
                 try:
                     res = await app.invoke(SearchCustomEmoji(emoticon=em, hash=0))
-                    if isinstance(res, EmojiList) and res.document_id: ids.extend(res.document_id[:limit])
-                except pyrogram.errors.Unauthorized: await ensure_authorized(); await wait_for_auth()
-            if not ids: return {"error": "No emojis found. Use symbols, not text."}
+                    if isinstance(res, EmojiList) and res.document_id:
+                        return em, res.document_id[:limit]
+                except: pass
+                return em, []
+
+            search_results = await asyncio.gather(*(search_one(em) for em in emoticons))
+            query_to_ids = {em: ids for em, ids in search_results if ids}
+            all_found_ids = [idx for ids in query_to_ids.values() for idx in ids]
             
-            docs = await app.invoke(GetCustomEmojiDocuments(document_id=list(set(ids))))
-            details = []
-            for d in docs:
-                alt, p_name = "", ""
-                for a in d.attributes:
-                    if hasattr(a, 'alt'): alt = a.alt
-                    if hasattr(a, 'stickerset'):
-                        try:
-                            s = await app.invoke(pyrogram.raw.functions.messages.GetStickerSet(stickerset=a.stickerset, hash=0))
-                            p_name = s.set.short_name
-                        except: pass
-                mime = getattr(d, 'mime_type', '')
-                is_anim = mime in ('video/webm', 'application/x-tgsticker')
-                if (pack_name and pack_name.lower() not in p_name.lower()) or (is_animated is not None and is_animated != is_anim): continue
-                
-                ext = ".webm" if mime == 'video/webm' else (".tgs" if mime == 'application/x-tgsticker' else ".webp")
-                fname = f"emoji_{d.id}{ext}"
-                df = await app.download_media(FileId(file_type=FileType.STICKER, dc_id=d.dc_id, media_id=d.id, access_hash=d.access_hash, file_reference=d.file_reference).encode(), file_name=os.path.join(DOWNLOADS_DIR, fname))
-                details.append({"id": str(d.id), "base_emoji": alt or "Other", "pack_name": p_name, "is_animated": is_anim, "local_file_path": os.path.abspath(df)})
+            if not all_found_ids: return {"error": "No emojis found."}
             
-            if not details: return {"error": "No results after filtering"}
+            # 2. Get info for all found stickers in one call
+            all_docs = await app.invoke(GetCustomEmojiDocuments(document_id=list(set(all_found_ids))))
+            doc_map = {d.id: d for d in all_docs}
             
-            grouped = {}
-            for i in details:
-                b = i['base_emoji']
-                if b not in grouped: grouped[b] = []
-                grouped[b].append(i)
+            # 3. Parallel download of stickers with limit
+            semaphore = asyncio.Semaphore(10)
+            async def download_one(d):
+                async with semaphore:
+                    try:
+                        mime = getattr(d, 'mime_type', '')
+                        is_anim = mime in ('video/webm', 'application/x-tgsticker')
+                        if (is_animated is not None and is_animated != is_anim): return None
+                        
+                        ext = ".webm" if mime == 'video/webm' else (".tgs" if mime == 'application/x-tgsticker' else ".webp")
+                        fname = f"emoji_{d.id}{ext}"
+                        local_p = os.path.join(DOWNLOADS_DIR, fname)
+                        if not os.path.exists(local_p):
+                            await app.download_media(FileId(file_type=FileType.STICKER, dc_id=d.dc_id, media_id=d.id, access_hash=d.access_hash, file_reference=d.file_reference).encode(), file_name=local_p)
+                        
+                        # Pack name
+                        p_name = ""
+                        for a in d.attributes:
+                            if hasattr(a, 'stickerset'):
+                                try:
+                                    s = await app.invoke(pyrogram.raw.functions.messages.GetStickerSet(stickerset=a.stickerset, hash=0))
+                                    p_name = s.set.short_name
+                                except: pass
+                        
+                        if pack_name and pack_name.lower() not in p_name.lower(): return None
+                        
+                        return {
+                            "id": str(d.id), "pack_name": p_name, "is_animated": is_anim, 
+                            "local_file_path": os.path.abspath(local_p), "filename": fname
+                        }
+                    except: return None
+
+            download_tasks = [download_one(doc_map[doc_id]) for doc_id in set(all_found_ids) if doc_id in doc_map]
+            downloaded_details = await asyncio.gather(*download_tasks)
+            details_map = {det['id']: det for det in downloaded_details if det}
             
+            # --- UI Generation ---
             sections_h = ""
-            for base, items in grouped.items():
+            for em_query, ids in query_to_ids.items():
                 items_h = ""
-                for i in items:
-                    fn = os.path.basename(i['local_file_path']); ext = os.path.splitext(fn)[1]
-                    media = f"<video autoplay loop muted src='{fn}'></video>" if ext=='.webm' else (f"<img src='{fn}'>" if ext!='.tgs' else f"<div id='l_{i['id']}'></div><script>lottie.loadAnimation({{container:document.getElementById('l_{i['id']}'),renderer:'canvas',loop:true,autoplay:true,animationData:{gzip.open(i['local_file_path'],'rt').read()}}})</script>")
-                    items_h += f"""<div class='card' onclick='t("{i['id']}", "{base}")' id='c_{i['id']}'>
-                        <div class='checkbox-box'><input type='radio' name='group_{base}' id='i_{i['id']}' data-id='{i['id']}' data-base='{base}'></div>
-                        {media}<div class='pname'>{i['pack_name']}</div></div>"""
-                sections_h += f"<div class='section'><h3>{base}</h3><div class='grid'>{items_h}</div></div>"
+                for doc_id in ids:
+                    det = details_map.get(str(doc_id))
+                    if not det: continue
+                    
+                    media = f"<video autoplay loop muted src='{det['filename']}'></video>" if det['filename'].endswith('.webm') else (f"<img src='{det['filename']}'>" if not det['filename'].endswith('.tgs') else f"<div id='l_{det['id']}'></div><script>lottie.loadAnimation({{container:document.getElementById('l_{det['id']}'),renderer:'canvas',loop:true,autoplay:true,animationData:{gzip.open(det['local_file_path'],'rt').read()}}})</script>")
+                    items_h += f"""<div class='card' onclick='t("{det['id']}", "{em_query}")' id='c_{det['id']}'>
+                        <div class='checkbox-box'><input type='radio' name='group_{em_query}' id='i_{det['id']}' data-id='{det['id']}' data-query='{em_query}'></div>
+                        {media}<div class='pname'>{det['pack_name']}</div></div>"""
+                
+                if items_h:
+                    sections_h += f"<div class='section'><h3>{em_query}</h3><div class='grid'>{items_h}</div></div>"
+
+            if not sections_h: return {"error": "No results found after filtering"}
 
             html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'><script src='https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.12.2/lottie.min.js'></script><style>
                 body{{background:#0f172a;color:white;font-family:sans-serif;margin:0;padding:20px}}
@@ -288,22 +318,22 @@ async def search_and_select_emoji(
                 .btn{{background:#0284c7;color:white;border:none;padding:12px 24px;border-radius:8px;cursor:pointer;font-weight:bold}}
                 input[type=radio]{{width:18px;height:18px;cursor:pointer}}
             </style></head><body>
-                <div class='header'><div><h2 style='margin:0'>Emoji Selection</h2><p style='margin:5px 0 0 0;font-size:12px;color:#94a3b8'>Select one per section</p></div><button onclick='s()' id='sub' class='btn'>Confirm</button></div>
+                <div class='header'><div><h2 style='margin:0'>Emoji Selection</h2><p style='margin:5px 0 0 0;font-size:12px;color:#94a3b8'>Select one per search query</p></div><button onclick='s()' id='sub' class='btn'>Confirm</button></div>
                 {sections_h}
                 <script>
-                    function t(id, group){{
-                        document.querySelectorAll('input[name="group_'+group+'"]').forEach(rb => document.getElementById('c_'+rb.dataset.id).classList.remove('selected'));
+                    function t(id, q){{
+                        document.querySelectorAll('input[data-query="'+q+'"]').forEach(rb => document.getElementById('c_'+rb.dataset.id).classList.remove('selected'));
                         const c=document.getElementById('c_'+id), i=document.getElementById('i_'+id);
                         i.checked=true; c.classList.add('selected');
                     }}
                     async function s(){{
                         const b=document.getElementById('sub'); b.disabled=true; b.innerText='Sending...';
-                        const res=[]; document.querySelectorAll('input:checked').forEach(i=>res.push({{id:i.dataset.id,base_emoji:i.dataset.base}}));
-                        if(!res.length) {{ alert('Select at least one!'); b.disabled=false; b.innerText='Confirm'; return; }}
+                        const res=[]; document.querySelectorAll('input:checked').forEach(i=>res.push({{id:i.dataset.id,query:i.dataset.query}}));
+                        if(!res.length) {{ alert('Please select at least one!'); b.disabled=false; b.innerText='Confirm'; return; }}
                         try {{
                             await fetch('/select',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{selections:res}})}});
                             window.close();
-                        }} catch(e) {{ alert('Error sending selection'); b.disabled=false; }}
+                        }} catch(e) {{ alert('Error'); b.disabled=false; }}
                     }}
                 </script></body></html>"""
             
@@ -314,36 +344,38 @@ async def search_and_select_emoji(
             selected_emoji_future = asyncio.Future()
             try:
                 raw_res = await asyncio.wait_for(selected_emoji_future, 300.0)
-                mapping = {}
-                for sel in raw_res.get("selections", []):
-                    emo = sel['base_emoji']
-                    if emo not in mapping: mapping[emo] = []
-                    mapping[emo].append(sel['id'])
+                mapping = {sel['query']: [sel['id']] for sel in raw_res.get("selections", [])}
                 cleanup_downloads(); return {"status": "success", "selection_mapping": mapping}
             except: return {"error": "Timeout"}
         except Exception as e: return {"error": str(e)}
 
 @mcp.tool()
 async def search_emoji_auto(emoticons: list[str], limit: int = 5, pack_name: str = None, is_animated: bool = None) -> dict:
-    """Non-interactive search for Telegram emojis. Returns raw mapping. Use Unicode symbols only."""
+    """Non-interactive search for Telegram emojis. returns mapping. Unicode symbols only."""
     await check_for_updates()
     if not await ensure_authorized() and not await wait_for_auth(): return {"error": "Auth failed"}
     app = get_tg_client()
     async with app:
         try:
-            ids = []
-            for em in emoticons:
+            # Parallel search
+            async def search_one(em):
                 try:
                     res = await app.invoke(SearchCustomEmoji(emoticon=em, hash=0))
-                    if isinstance(res, EmojiList) and res.document_id: ids.extend(res.document_id[:limit])
-                except pyrogram.errors.Unauthorized: await ensure_authorized(); await wait_for_auth()
-            if not ids: return {"error": "No results"}
-            docs = await app.invoke(GetCustomEmojiDocuments(document_id=list(set(ids))))
-            results = []
+                    if isinstance(res, EmojiList) and res.document_id: return em, res.document_id[:limit]
+                except: pass
+                return em, []
+
+            results = await asyncio.gather(*(search_one(em) for em in emoticons))
+            query_to_ids = {em: ids for em, ids in results if ids}
+            all_ids = [idx for ids in query_to_ids.values() for idx in ids]
+            
+            if not all_ids: return {"error": "No results"}
+            docs = await app.invoke(GetCustomEmojiDocuments(document_id=list(set(all_ids))))
+            
+            final_res = []
             for d in docs:
-                alt, p_name = "", ""
+                p_name = ""
                 for a in d.attributes:
-                    if hasattr(a, 'alt'): alt = a.alt
                     if hasattr(a, 'stickerset'):
                         try:
                             s = await app.invoke(pyrogram.raw.functions.messages.GetStickerSet(stickerset=a.stickerset, hash=0))
@@ -352,8 +384,8 @@ async def search_emoji_auto(emoticons: list[str], limit: int = 5, pack_name: str
                 mime = getattr(d, 'mime_type', '')
                 is_anim = mime in ('video/webm', 'application/x-tgsticker')
                 if (pack_name and pack_name.lower() not in p_name.lower()) or (is_animated is not None and is_animated != is_anim): continue
-                results.append({"id": str(d.id), "base_emoji": alt or "Other", "pack_name": p_name, "is_animated": is_anim})
-            return {"status": "success", "results": results}
+                final_res.append({"id": str(d.id), "pack_name": p_name, "is_animated": is_anim})
+            return {"status": "success", "results": final_res}
         except Exception as e: return {"error": str(e)}
 
 def main():

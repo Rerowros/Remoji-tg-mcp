@@ -10,83 +10,109 @@
 <a name="english"></a>
 ## English
 
-Telegram Emoji Search & Selection MCP Server. This tool allows AI models (like Claude or Gemini) to search for custom Telegram stickers/emojis and lets you visually select the best ones via a web interface.
+Telegram Emoji Search & Selection MCP Server. This tool allows AI models to search for custom Telegram stickers/emojis and lets you visually select the best ones via a web interface.
 
 ### ✨ Features
-- **Interactive Selection:** Opens a local web UI for you to pick the perfect emoji.
-- **Web-based Auth:** No terminal input needed. Phone, OTP, and 2FA password are all handled in your browser.
-- **Auto-Cleanup:** Temporary preview files are automatically deleted after selection.
-- **Session Security:** Optional encryption for your session file.
-- **Update Notifications:** Notifies you in the logs when a new version is available on PyPI.
+- **Grouped Search:** Results are organized by your search queries.
+- **Performance:** High-speed rendering for 50+ animated emojis.
+- **Silent Auth:** Silent waiting for user login in the browser.
+- **Data Safety:** Files are stored in a dedicated system folder (AppData/Roaming).
 
-### 🚀 Quick Start (Claude Desktop)
+### 🛠 Prerequisites
+You must have **uv** installed:
+- **Windows:** `powershell -c "irm https://astral.sh/uv/install.ps1 | iex"`
+- **macOS/Linux:** `curl -LsSf https://astral.sh/uv/install.sh | sh`
 
-Add this to your `claude_desktop_config.json`:
+### 🚀 Installation Guide
 
+#### 1. Claude Desktop
+Add this to your `%AppData%\Roaming\Claude\claude_desktop_config.json`:
 ```json
 "mcpServers": {
   "remoji-tg-mcp": {
     "command": "uvx",
-    "args": ["remoji-tg-mcp"]
+    "args": ["--refresh", "remoji-tg-mcp"]
   }
 }
 ```
 
-### ⚙️ Configuration & Data Security
+#### 2. VS Code (Cline / Roo Code / MCP Client)
+Add to your extension's MCP settings:
+```json
+"emoji-tg-mcp": {
+  "command": "uvx",
+  "args": ["--refresh", "remoji-tg-mcp"]
+}
+```
 
-On the first run, the server will open a browser tab asking for your **Telegram API ID** and **API HASH** (get them at [my.telegram.org](https://my.telegram.org/apps)).
+#### 3. Cursor
+1. Go to **Settings** -> **General** -> **MCP**.
+2. Click **+ Add Agent**.
+3. Name: `Telegram-Emoji`, Type: `command`, Command: `uvx --refresh remoji-tg-mcp`.
 
-#### Where is my data stored?
-By default, the server creates files in the directory from which the host (e.g., Claude) was started:
-- `.env`: Stores your API credentials.
-- `user_session.session`: Your Telegram session (Auth Key).
-- `downloads/`: Temporary folder for emoji previews (auto-cleaned).
-
-#### 🛡️ Protecting Sensitive Data
-To protect your `.session` file, you can add `SESSION_PASSWORD="your_password"` to your `.env` file. If set, the session file will be encrypted using this password.
+#### 4. Windsurf
+Add to your `mcp_config.json` or MCP panel:
+```json
+"remoji-tg-mcp": {
+  "command": "uvx",
+  "args": ["--refresh", "remoji-tg-mcp"]
+}
+```
 
 ---
 
 <a name="русский"></a>
 ## Русский
 
-MCP-сервер для поиска и выбора кастомных эмодзи Telegram. Этот инструмент позволяет нейросетям (Claude, Gemini) искать стикеры и предоставляет вам удобный веб-интерфейс для выбора наиболее подходящих вариантов.
+MCP-сервер для поиска и выбора кастомных эмодзи Telegram. Позволяет нейросетям искать стикеры и предоставляет веб-интерфейс для выбора.
 
-### ✨ Особенности
-- **Интерактивный выбор:** Модель открывает страницу в браузере, где вы сами кликаете на нужные эмодзи.
-- **Авторизация в браузере:** Код подтверждения (OTP) и пароль 2FA вводятся через веб-форму — никакой работы с терминалом.
-- **Авто-очистка:** Все временные файлы превью удаляются сразу после того, как вы подтвердили выбор.
-- **Безопасность сессии:** Поддержка шифрования файла сессии паролем.
-- **Проверка обновлений:** Сервер подскажет в логах, если на PyPI вышла новая версия.
+### 🛠 Предварительные требования
+У вас должен быть установлен **uv**:
+- **Windows:** `powershell -c "irm https://astral.sh/uv/install.ps1 | iex"`
+- **macOS/Linux:** `curl -LsSf https://astral.sh/uv/install.sh | sh`
 
-### 🚀 Быстрый старт (Claude Desktop)
+### 🚀 Инструкция по установке
 
-Добавьте в ваш конфиг `claude_desktop_config.json`:
-
+#### 1. Claude Desktop
+Добавьте в `%AppData%\Roaming\Claude\claude_desktop_config.json`:
 ```json
 "mcpServers": {
   "remoji-tg-mcp": {
     "command": "uvx",
-    "args": ["remoji-tg-mcp"]
+    "args": ["--refresh", "remoji-tg-mcp"]
   }
 }
 ```
 
-### ⚙️ Настройка и безопасность данных
-
-При первом запуске сервер откроет вкладку в браузере и попросит ввести **API ID** и **API HASH** (их нужно получить на [my.telegram.org](https://my.telegram.org/apps)).
-
-#### Где хранятся данные?
-Файлы создаются в рабочей директории процесса, запустившего сервер (обычно это корень вашего профиля пользователя):
-- `.env`: Хранит ваши API ключи.
-- `user_session.session`: Файл сессии Telegram (ключ доступа к аккаунту).
-- `downloads/`: Папка для временных превью (очищается автоматически).
-
-#### 🛡️ Защита чувствительных данных
-Чтобы защитить файл сессии, вы можете вручную добавить строку `SESSION_PASSWORD="ваш_пароль"` в файл `.env`. В этом случае файл `.session` будет зашифрован этим паролем.
-
-### 🛠 Обновление
-Если сервер сообщил о наличии новой версии, выполните:
-```bash
-uv tool upgrade remoji-tg-mcp
+#### 2. VS Code (Cline / Roo Code)
+Вставьте в настройки MCP вашего расширения:
+```json
+"emoji-tg-mcp": {
+  "command": "uvx",
+  "args": ["--refresh", "remoji-tg-mcp"]
+}
 ```
+
+#### 3. Cursor
+1. **Settings** -> **General** -> **MCP**.
+2. **+ Add Agent**.
+3. Name: `Telegram-Emoji`, Type: `command`, Command: `uvx --refresh remoji-tg-mcp`.
+
+#### 4. Windsurf
+Добавьте в конфигурацию MCP:
+```json
+"remoji-tg-mcp": {
+  "command": "uvx",
+  "args": ["--refresh", "remoji-tg-mcp"]
+}
+```
+
+### ⚙️ Настройка и безопасность
+При первом запуске откроется браузер для ввода **API ID** и **API HASH** ([my.telegram.org](https://my.telegram.org/apps)).
+
+**Где лежат данные?**
+- **Windows:** `%AppData%\Roaming\remoji-tg-mcp`
+- **macOS/Linux:** Стандартные папки данных пользователя.
+
+**Шифрование:**
+Добавьте `SESSION_PASSWORD="пароль"` в файл `.env` в папке данных для защиты файла сессии.
