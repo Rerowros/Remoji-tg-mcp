@@ -28,11 +28,11 @@ from pyrogram.file_id import FileId, FileType
 from dotenv import load_dotenv, set_key
 from platformdirs import user_data_dir
 
-# Версия 0.3.0 - Финальный релиз с улучшенными промптами
-VERSION = "0.3.0"
+# Version 0.3.1 - Enhanced AI Prompts (No text names for emojis)
+VERSION = "0.3.1"
 PACKAGE_NAME = "remoji-tg-mcp"
 
-# --- Пути ---
+# --- Paths ---
 BASE_DIR = user_data_dir(PACKAGE_NAME, "Rerowros")
 os.makedirs(BASE_DIR, exist_ok=True)
 ENV_FILE = os.path.join(BASE_DIR, ".env")
@@ -40,14 +40,14 @@ DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
 SESSION_FILE = os.path.join(BASE_DIR, "user_session")
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
-# --- Фикс кодировки ---
+# --- Encoding Fix ---
 if sys.platform == "win32":
     try:
         if hasattr(sys.stderr, 'reconfigure'): sys.stderr.reconfigure(encoding='utf-8')
         if hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(encoding='utf-8')
     except Exception: pass
 
-# --- Логирование ---
+# --- Logging ---
 logger = logging.getLogger("tg-emoji-mcp")
 handler = logging.StreamHandler(sys.stderr)
 handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
@@ -69,7 +69,7 @@ auth_session = {
     "step": "config", "error": None
 }
 
-# --- Утилиты ---
+# --- Utils ---
 
 def cleanup_downloads():
     if os.path.exists(DOWNLOADS_DIR):
@@ -78,8 +78,8 @@ def cleanup_downloads():
                 path = os.path.join(DOWNLOADS_DIR, f)
                 if os.path.isfile(path): os.unlink(path)
                 elif os.path.isdir(path): shutil.rmtree(path)
-            logger.info("Временные файлы удалены")
-        except Exception as e: logger.error(f"Ошибка очистки: {e}")
+            logger.info("Downloads cleared")
+        except Exception as e: logger.error(f"Cleanup error: {e}")
 
 def get_tg_client():
     api_id, api_hash = os.environ.get("TG_API_ID"), os.environ.get("TG_API_HASH")
@@ -129,7 +129,7 @@ async def open_auth_page():
 
 async def wait_for_auth():
     global config_update_future
-    logger.info("Ожидание авторизации в браузере...")
+    logger.info("Waiting for authorization in browser...")
     try:
         await asyncio.wait_for(config_update_future, 600.0)
         return True
@@ -207,8 +207,22 @@ async def start_web_server():
     return f"http://127.0.0.1:{web_server_port}"
 
 @mcp.tool()
-async def search_and_select_emoji(emoticons: list[str], limit: int = 10, pack_name: str = None, is_animated: bool = None) -> dict:
-    """Search for custom Telegram emojis and open a browser UI for user selection. IMPORTANT: Use only basic Unicode emojis as search terms (e.g. ❌, 🔴, 💎)."""
+async def search_and_select_emoji(
+    emoticons: list[str], 
+    limit: int = 10, 
+    pack_name: str = None, 
+    is_animated: bool = None
+) -> dict:
+    """
+    Interactive tool to search for custom Telegram emojis. Opens a browser UI for selection.
+    
+    Args:
+        emoticons: List of SINGLE Unicode emoji symbols (e.g. ["🔥", "💎"]). 
+                   CRITICAL: DO NOT use text names like 'fire'. ONLY USE SYMBOLS.
+        limit: Max results per symbol (max 50).
+        pack_name: Optional filter by pack name.
+        is_animated: Optional filter for animation.
+    """
     global selected_emoji_future
     cleanup_downloads(); await check_for_updates()
     if not await ensure_authorized() and not await wait_for_auth(): return {"error": "Auth failed"}
@@ -221,7 +235,7 @@ async def search_and_select_emoji(emoticons: list[str], limit: int = 10, pack_na
                     res = await app.invoke(SearchCustomEmoji(emoticon=em, hash=0))
                     if isinstance(res, EmojiList) and res.document_id: ids.extend(res.document_id[:limit])
                 except pyrogram.errors.Unauthorized: await ensure_authorized(); await wait_for_auth()
-            if not ids: return {"error": "Not found"}
+            if not ids: return {"error": "No emojis found. Ensure you provided actual Unicode symbols, not text names."}
             docs = await app.invoke(GetCustomEmojiDocuments(document_id=list(set(ids))))
             details = []
             for d in docs:
@@ -259,8 +273,22 @@ async def search_and_select_emoji(emoticons: list[str], limit: int = 10, pack_na
         except Exception as e: return {"error": str(e)}
 
 @mcp.tool()
-async def search_emoji_auto(emoticons: list[str], limit: int = 5, pack_name: str = None, is_animated: bool = None) -> dict:
-    """Non-interactive search for custom Telegram emojis. Returns a raw list of results. Use only basic Unicode emojis as search terms (e.g. ❌, 🔴, 💎)."""
+async def search_emoji_auto(
+    emoticons: list[str], 
+    limit: int = 5, 
+    pack_name: str = None, 
+    is_animated: bool = None
+) -> dict:
+    """
+    Non-interactive search for Telegram emojis. Returns a raw list of metadata.
+    
+    Args:
+        emoticons: List of SINGLE Unicode emoji symbols (e.g. ["🔥", "💎"]). 
+                   CRITICAL: DO NOT use text names like 'fire'. ONLY USE SYMBOLS.
+        limit: Max results per symbol.
+        pack_name: Optional filter by pack name.
+        is_animated: Optional filter for animation.
+    """
     await check_for_updates()
     if not await ensure_authorized() and not await wait_for_auth(): return {"error": "Auth failed"}
     app = get_tg_client()
@@ -272,7 +300,7 @@ async def search_emoji_auto(emoticons: list[str], limit: int = 5, pack_name: str
                     res = await app.invoke(SearchCustomEmoji(emoticon=em, hash=0))
                     if isinstance(res, EmojiList) and res.document_id: ids.extend(res.document_id[:limit])
                 except pyrogram.errors.Unauthorized: await ensure_authorized(); await wait_for_auth()
-            if not ids: return {"error": "Not found"}
+            if not ids: return {"error": "No emojis found. Ensure you provided actual Unicode symbols."}
             docs = await app.invoke(GetCustomEmojiDocuments(document_id=list(set(ids))))
             results = []
             for d in docs:
