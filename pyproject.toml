@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "remoji-tg-mcp"
+version = "0.1.0"
+description = "Telegram Emoji Search & Selection MCP Server"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.2.0",
+    "pyrogram>=2.0.106",
+    "tgcrypto>=1.2.5",
+    "python-dotenv>=1.0.1",
+    "aiohttp>=3.9.0"
+]
+
+[project.scripts]
+remoji-tg-mcp = "tg_emoji_mcp:main"
