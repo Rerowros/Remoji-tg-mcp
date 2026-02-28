@@ -1,0 +1,2 @@
+[console_scripts]
+remoji-tg-mcp = tg_emoji_mcp:main
