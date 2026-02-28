@@ -2,7 +2,10 @@
 # dependencies = [
 #   "mcp",
 #   "pyrogram",
-#   "tgcrypto"
+#   "tgcrypto",
+#   "platformdirs",
+#   "python-dotenv",
+#   "aiohttp"
 # ]
 # ///
 
@@ -23,15 +26,27 @@ from pyrogram.raw.functions.messages import SearchCustomEmoji, GetCustomEmojiDoc
 from pyrogram.raw.types import EmojiList
 from pyrogram.file_id import FileId, FileType
 from dotenv import load_dotenv, set_key
+from platformdirs import user_data_dir
 
 # Текущая версия
-VERSION = "0.1.9"
+VERSION = "0.2.0"
 PACKAGE_NAME = "remoji-tg-mcp"
+
+# --- Настройка путей ---
+# Мы больше не используем текущую директорию (C:\Users\...),
+# а создаем отдельную папку в AppData (или аналогах в Linux/macOS)
+BASE_DIR = user_data_dir(PACKAGE_NAME, "Rerowros")
+os.makedirs(BASE_DIR, exist_ok=True)
+
+ENV_FILE = os.path.join(BASE_DIR, ".env")
+DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
+SESSION_FILE = os.path.join(BASE_DIR, "user_session")
+
+os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
 # --- Фикс кодировки для Windows ---
 if sys.platform == "win32":
     try:
-        # Пытаемся переключить стандартные потоки в UTF-8
         if hasattr(sys.stderr, 'reconfigure'):
             sys.stderr.reconfigure(encoding='utf-8')
         if hasattr(sys.stdout, 'reconfigure'):
@@ -39,11 +54,10 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-# Настройка логирования с явным указанием UTF-8
+# Настройка логирования
 logger = logging.getLogger("tg-emoji-mcp")
 handler = logging.StreamHandler(sys.stderr)
 handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-# В Python 3.9+ у StreamHandler нет аргумента encoding, он берется из потока
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
@@ -51,14 +65,18 @@ logger.setLevel(logging.INFO)
 for l in ["pyrogram", "asyncio", "aiohttp"]:
     logging.getLogger(l).setLevel(logging.WARNING)
 
-load_dotenv()
+# Загружаем .env из правильного места
+if os.path.exists(ENV_FILE):
+    load_dotenv(ENV_FILE)
+else:
+    # Создаем пустой .env если его нет
+    with open(ENV_FILE, "w") as f: pass
+    load_dotenv(ENV_FILE)
+
+# Инициализация MCP
 mcp = FastMCP("TelegramEmojiSearch")
 
-BASE_DIR = os.path.abspath(os.getcwd())
-ENV_FILE = os.path.join(BASE_DIR, ".env")
-DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
-SESSION_FILE = os.path.join(BASE_DIR, "user_session")
-
+# Глобальные переменные управления
 selected_emoji_future = None
 config_update_future = None
 web_app_runner = None
@@ -72,6 +90,7 @@ auth_session = {
 # --- Утилиты ---
 
 def cleanup_downloads():
+    """Полная очистка папки загрузок в AppData"""
     if os.path.exists(DOWNLOADS_DIR):
         try:
             for f in os.listdir(DOWNLOADS_DIR):
@@ -86,7 +105,15 @@ def get_tg_client():
     api_hash = os.environ.get("TG_API_HASH")
     pw = os.environ.get("SESSION_PASSWORD")
     if not api_id or not api_hash: return None
-    return Client(SESSION_FILE, api_id=int(api_id), api_hash=api_hash, password=pw, device_model="MCP Server")
+    try:
+        return Client(
+            SESSION_FILE, 
+            api_id=int(api_id), 
+            api_hash=api_hash, 
+            password=pw, 
+            device_model="MCP Server"
+        )
+    except: return None
 
 async def check_for_updates():
     try:
@@ -111,11 +138,14 @@ async def ensure_authorized():
         await open_auth_page(); return False
     except Exception as e:
         logger.error(f"Ошибка авторизации: {e}")
-        # АВТО-УДАЛЕНИЕ БИТОЙ СЕССИИ
+        # Авто-удаление битой сессии
         if any(x in str(e) for x in ["AUTH_KEY_UNREGISTERED", "SESSION_REVOKED", "SESSION_EXPIRED"]):
-            logger.warning("Сессия недействительна. Удаляю файл...")
+            logger.warning("Сессия недействительна. Удаляю файлы...")
             for ext in [".session", ".session-journal"]:
-                if os.path.exists(SESSION_FILE + ext): os.remove(SESSION_FILE + ext)
+                path = SESSION_FILE + ext
+                if os.path.exists(path):
+                    try: os.remove(path)
+                    except: pass
         auth_session.update({"step": "config", "error": f"Нужен повторный вход: {e}"})
         await open_auth_page(); return False
     finally:
@@ -127,20 +157,23 @@ async def open_auth_page():
     webbrowser.open(url)
     if not config_update_future or config_update_future.done(): config_update_future = asyncio.Future()
 
-# --- Web ---
+# --- Web Handlers ---
 
 async def handle_auth_get(request):
     s, err = auth_session["step"], auth_session["error"]
     err_html = f'<div style="color:#ff4d4d;background:rgba(255,0,0,0.1);padding:15px;border-radius:10px;margin-bottom:20px;border:1px solid #ff4d4d">{err}</div>' if err else ""
+    
     forms = {
-        "config": '<h2>1. API Ключи</h2><form action="/auth/config" method="post"><label>API ID</label><input type="text" name="api_id" required><label>API HASH</label><input type="text" name="api_hash" required><button class="btn">Сохранить</button></form>',
+        "config": '<h2>1. API Ключи</h2><p style="color:#94a3b8;font-size:12px">Данные сохранятся в вашем профиле (AppData)</p><form action="/auth/config" method="post"><label>API ID</label><input type="text" name="api_id" required><label>API HASH</label><input type="text" name="api_hash" required><button class="btn">Сохранить</button></form>',
         "phone": '<h2>2. Телефон</h2><form action="/auth/phone" method="post"><label>Номер телефона</label><input type="text" name="phone" placeholder="+7..." required autofocus><button class="btn">Получить код</button></form>',
         "code": '<h2>3. Код подтверждения</h2><form action="/auth/code" method="post"><label>Код из Telegram</label><input type="text" name="code" required autofocus><button class="btn">Войти</button></form>',
         "password": '<h2>4. Облачный пароль</h2><form action="/auth/password" method="post"><label>Пароль (2FA)</label><input type="password" name="password" required autofocus><button class="btn">Подтвердить</button></form>',
         "done": '<h2>✅ Успешно!</h2><p>Вы вошли в систему. Можно закрыть вкладку.</p>'
     }
     content = forms.get(s, forms["config"])
-    return web.Response(text=f'<!DOCTYPE html><html><head><meta charset="utf-8"><title>Auth</title><style>body{{font-family:sans-serif;background:#0f172a;color:white;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}}.container{{background:#1e293b;padding:40px;border-radius:20px;width:350px;box-shadow:0 20px 50px rgba(0,0,0,0.5);border:1px solid #334155}}label{{display:block;margin:15px 0 5px;color:#94a3b8;font-size:14px}}input{{width:100%;padding:12px;background:#0f172a;border:1px solid #334155;border-radius:10px;color:white;box-sizing:border-box;font-size:16px}}.btn{{width:100%;background:#0284c7;color:white;border:none;padding:15px;border-radius:10px;margin-top:20px;cursor:pointer;font-weight:bold}}</style></head><body><div class="container">{err_html}{content}</div></body></html>', content_type='text/html')
+    
+    html = f'<!DOCTYPE html><html><head><meta charset="utf-8"><title>Auth</title><style>body{{font-family:sans-serif;background:#0f172a;color:white;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}}.container{{background:#1e293b;padding:40px;border-radius:20px;width:350px;box-shadow:0 20px 50px rgba(0,0,0,0.5);border:1px solid #334155}}label{{display:block;margin:15px 0 5px;color:#94a3b8;font-size:14px}}input{{width:100%;padding:12px;background:#0f172a;border:1px solid #334155;border-radius:10px;color:white;box-sizing:border-box;font-size:16px}}.btn{{width:100%;background:#0284c7;color:white;border:none;padding:15px;border-radius:10px;margin-top:20px;cursor:pointer;font-weight:bold}}</style></head><body><div class="container">{err_html}{content}</div></body></html>'
+    return web.Response(text=html, content_type='text/html')
 
 async def handle_auth_config(request):
     d = await request.post(); aid, ah = str(d.get('api_id','')).strip(), str(d.get('api_hash','')).strip()
@@ -148,7 +181,9 @@ async def handle_auth_config(request):
         set_key(ENV_FILE, "TG_API_ID", aid); set_key(ENV_FILE, "TG_API_HASH", ah)
         os.environ.update({"TG_API_ID": aid, "TG_API_HASH": ah})
         auth_session.update({"step": "phone", "error": None})
-        if auth_session["client"]: await auth_session["client"].disconnect()
+        if auth_session["client"]: 
+            try: await auth_session["client"].disconnect()
+            except: pass
         auth_session["client"] = get_tg_client()
     else: auth_session["error"] = "Некорректные данные API"
     return web.HTTPFound('/auth')
@@ -161,36 +196,38 @@ async def handle_auth_phone(request):
     try:
         if not c.is_connected: await c.connect()
         res = await c.send_code(p); auth_session.update({"phone_code_hash": res.phone_code_hash, "step": "code", "error": None})
-    except Exception as e: auth_session["error"] = f"Ошибка: {e}"
+    except Exception as e: auth_session["error"] = str(e)
     return web.HTTPFound('/auth')
 
 async def handle_auth_code(request):
     d = await request.post(); code = str(d.get('code','')).strip()
     c = auth_session["client"]
     try:
+        if not c.is_connected: await c.connect()
         await c.sign_in(auth_session["phone"], auth_session["phone_code_hash"], code)
         auth_session.update({"step": "done", "error": None})
         if config_update_future and not config_update_future.done(): config_update_future.set_result(True)
         await c.disconnect()
     except pyrogram.errors.SessionPasswordNeeded: auth_session["step"] = "password"
-    except Exception as e: auth_session["error"] = f"Ошибка: {e}"
+    except Exception as e: auth_session["error"] = str(e)
     return web.HTTPFound('/auth')
 
 async def handle_auth_password(request):
     d = await request.post(); pw = str(d.get('password','')).strip()
     c = auth_session["client"]
     try:
+        if not c.is_connected: await c.connect()
         await c.check_password(pw); auth_session.update({"step": "done", "error": None})
         if config_update_future and not config_update_future.done(): config_update_future.set_result(True)
         await c.disconnect()
-    except Exception as e: auth_session["error"] = f"Ошибка: {e}"
+    except Exception as e: auth_session["error"] = str(e)
     return web.HTTPFound('/auth')
 
 # --- Logic ---
 
 async def start_web_server():
     global web_app_runner, web_server_port
-    app = web.Application(); os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+    app = web.Application()
     app.router.add_static('/static', path=DOWNLOADS_DIR, name='static')
     app.router.add_post('/select', lambda r: (selected_emoji_future.set_result(asyncio.create_task(r.json())) if not selected_emoji_future.done() else None, web.Response(text="OK"))[1])
     app.router.add_get('/auth', handle_auth_get); app.router.add_post('/auth/config', handle_auth_config)
@@ -204,12 +241,14 @@ async def start_web_server():
 
 @mcp.tool()
 async def search_and_select_emoji(emoticons: list[str], limit: int = 10, pack_name: str = None, is_animated: bool = None) -> dict:
-    """Поиск кастомных эмодзи с интерактивным выбором."""
+    """Поиск кастомных эмодзи с интерактивным выбором в браузере."""
     global selected_emoji_future
     cleanup_downloads(); await check_for_updates()
+    
     if not await ensure_authorized():
         try: await asyncio.wait_for(config_update_future, 600.0)
         except: return {"error": "Таймаут авторизации"}
+    
     app = get_tg_client()
     async with app:
         try:
@@ -218,6 +257,7 @@ async def search_and_select_emoji(emoticons: list[str], limit: int = 10, pack_na
                 res = await app.invoke(SearchCustomEmoji(emoticon=em, hash=0))
                 if isinstance(res, EmojiList) and res.document_id: ids.extend(res.document_id[:limit])
             if not ids: return {"error": "Не найдено"}
+            
             docs = await app.invoke(GetCustomEmojiDocuments(document_id=list(set(ids))))
             details = []
             for d in docs:
@@ -233,13 +273,15 @@ async def search_and_select_emoji(emoticons: list[str], limit: int = 10, pack_na
                 is_anim = mime in ('video/webm', 'application/x-tgsticker')
                 if pack_name and pack_name.lower() not in p_name.lower(): continue
                 if is_animated is not None and is_animated != is_anim: continue
+                
                 ext = ".webm" if mime == 'video/webm' else (".tgs" if mime == 'application/x-tgsticker' else ".webp")
-                df = await app.download_media(FileId(file_type=FileType.STICKER, dc_id=d.dc_id, media_id=d.id, access_hash=d.access_hash, file_reference=d.file_reference).encode(), file_name=f"emoji_{d.id}{ext}")
-                details.append({"id": str(d.id), "base_emoji": alt, "pack_name": p_name, "is_animated": is_anim, "local_file_path": os.path.abspath(df)})
+                df = await app.download_media(FileId(file_type=FileType.STICKER, dc_id=d.dc_id, media_id=d.id, access_hash=d.access_hash, file_reference=d.file_reference).encode(), file_name=os.path.join(DOWNLOADS_DIR, f"emoji_{d.id}{ext}"))
+                if df:
+                    details.append({"id": str(d.id), "base_emoji": alt, "pack_name": p_name, "is_animated": is_anim, "local_file_path": os.path.abspath(df)})
             
             if not details: return {"error": "Нет результатов после фильтрации"}
             
-            # HTML Generator (inline for brevity)
+            # HTML
             h = ""
             for i in details:
                 fn = os.path.basename(i['local_file_path']); ext = os.path.splitext(fn)[1]
@@ -249,12 +291,15 @@ async def search_and_select_emoji(emoticons: list[str], limit: int = 10, pack_na
             with open(os.path.join(DOWNLOADS_DIR, "index.html"), "w", encoding="utf-8") as f:
                 f.write(f"<!DOCTYPE html><html><head><meta charset='utf-8'><script src='https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.12.2/lottie.min.js'></script><style>body{{background:#1e1e1e;color:white;font-family:sans-serif;padding:20px}}.grid{{display:flex;flex-wrap:wrap;gap:10px}}.card{{background:#2d2d2d;padding:10px;border-radius:10px;cursor:pointer;border:2px solid transparent;width:80px;height:80px;display:flex;align-items:center;justify-content:center}}video,img,div{{max-width:60px;max-height:60px}}.selected{{border-color:#4da6ff;background:#3d3d3d}}.header{{display:flex;justify-content:space-between;margin-bottom:20px;position:sticky;top:0;background:#1e1e1e;padding:10px 0;border-bottom:1px solid #333}}.btn{{background:#4da6ff;color:white;border:none;padding:10px 20px;border-radius:5px;cursor:pointer;font-weight:bold}}</style></head><body><div class='header'><h2>Выбор</h2><button onclick='s()' class='btn'>Готово</button></div><div class='grid'>{h}</div><script>function t(id){{const c=document.getElementById('c_'+id),i=document.getElementById('i_'+id);i.checked=!i.checked;c.classList.toggle('selected',i.checked)}}async function s(){{const res=[];document.querySelectorAll('input:checked').forEach(i=>res.push({{id:i.dataset.id,base_emoji:i.dataset.base}}));if(!res.length)return alert('Выберите!');await fetch('/select',{{method:'POST',body:JSON.stringify({{selections:res}})}});window.close()}}</script></body></html>")
             
-            base = f"http://127.0.0.1:{web_server_port}" if web_app_runner else await start_web_server()
-            webbrowser.open(f"{base}/static/index.html")
+            base_url = f"http://127.0.0.1:{web_server_port}" if web_app_runner else await start_web_server()
+            webbrowser.open(f"{base_url}/static/index.html")
+            
             selected_emoji_future = asyncio.Future()
             try:
-                res = await (await asyncio.wait_for(selected_emoji_future, 300.0))
-                cleanup_downloads(); return {"status": "success", "selected_emojis": res.get("selections", [])}
+                res_task = await asyncio.wait_for(selected_emoji_future, 300.0)
+                res = await res_task
+                cleanup_downloads()
+                return {"status": "success", "selected_emojis": res.get("selections", [])}
             except: return {"error": "Таймаут выбора"}
         except Exception as e: return {"error": str(e)}
 
@@ -262,7 +307,7 @@ async def search_and_select_emoji(emoticons: list[str], limit: int = 10, pack_na
 async def search_emoji_auto(emoticons: list[str], limit: int = 5, pack_name: str = None, is_animated: bool = None) -> dict:
     """Прямой поиск без интерактивного выбора."""
     await check_for_updates()
-    if not await ensure_authorized(): return {"error": "Нужна авторизация через search_and_select_emoji"}
+    if not await ensure_authorized(): return {"error": "Нужна авторизация"}
     app = get_tg_client()
     async with app:
         try:
@@ -292,7 +337,8 @@ async def search_emoji_auto(emoticons: list[str], limit: int = 5, pack_name: str
 
 def main():
     logger.info(f"Запуск Remoji TG MCP v{VERSION}")
-    logger.info(f"Рабочая директория: {BASE_DIR}")
-    cleanup_downloads(); mcp.run()
+    logger.info(f"Путь к данным: {BASE_DIR}")
+    cleanup_downloads()
+    mcp.run()
 
 if __name__ == "__main__": main()
