@@ -28,39 +28,32 @@ from pyrogram.file_id import FileId, FileType
 from dotenv import load_dotenv, set_key
 from platformdirs import user_data_dir
 
-# Текущая версия
-VERSION = "0.2.2"
+# Версия 0.3.0 - Финальный релиз с улучшенными промптами
+VERSION = "0.3.0"
 PACKAGE_NAME = "remoji-tg-mcp"
 
-# --- Настройка путей ---
+# --- Пути ---
 BASE_DIR = user_data_dir(PACKAGE_NAME, "Rerowros")
 os.makedirs(BASE_DIR, exist_ok=True)
-
 ENV_FILE = os.path.join(BASE_DIR, ".env")
 DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
 SESSION_FILE = os.path.join(BASE_DIR, "user_session")
-
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
-# --- Фикс кодировки для Windows ---
+# --- Фикс кодировки ---
 if sys.platform == "win32":
     try:
-        if hasattr(sys.stderr, 'reconfigure'):
-            sys.stderr.reconfigure(encoding='utf-8')
-        if hasattr(sys.stdout, 'reconfigure'):
-            sys.stdout.reconfigure(encoding='utf-8')
+        if hasattr(sys.stderr, 'reconfigure'): sys.stderr.reconfigure(encoding='utf-8')
+        if hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(encoding='utf-8')
     except Exception: pass
 
-# Настройка логирования
+# --- Логирование ---
 logger = logging.getLogger("tg-emoji-mcp")
 handler = logging.StreamHandler(sys.stderr)
 handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
-
-# Отключаем шумные логи
-for l in ["pyrogram", "asyncio", "aiohttp"]:
-    logging.getLogger(l).setLevel(logging.WARNING)
+for l in ["pyrogram", "asyncio", "aiohttp"]: logging.getLogger(l).setLevel(logging.WARNING)
 
 load_dotenv(ENV_FILE)
 mcp = FastMCP("TelegramEmojiSearch")
@@ -69,7 +62,7 @@ selected_emoji_future = None
 config_update_future = None
 web_app_runner = None
 web_server_port = None
-_update_checked = False # Флаг, чтобы проверять обновление только 1 раз за сессию
+_update_checked = False
 
 auth_session = {
     "client": None, "phone": None, "phone_code_hash": None,
@@ -89,8 +82,7 @@ def cleanup_downloads():
         except Exception as e: logger.error(f"Ошибка очистки: {e}")
 
 def get_tg_client():
-    api_id = os.environ.get("TG_API_ID")
-    api_hash = os.environ.get("TG_API_HASH")
+    api_id, api_hash = os.environ.get("TG_API_ID"), os.environ.get("TG_API_HASH")
     pw = os.environ.get("SESSION_PASSWORD")
     if not api_id or not api_hash: return None
     return Client(SESSION_FILE, api_id=int(api_id), api_hash=api_hash, password=pw, device_model="MCP Server")
@@ -105,15 +97,7 @@ async def check_for_updates():
                 if r.status == 200:
                     latest = (await r.json())["info"]["version"]
                     if latest != VERSION:
-                        logger.warning(
-                            f"\n{'!'*50}\n"
-                            f"ДОСТУПНО ОБНОВЛЕНИЕ: {latest} (у вас {VERSION})\n\n"
-                            f"Если вы используете uvx (Claude Desktop), выполните:\n"
-                            f"uvx --refresh {PACKAGE_NAME}\n\n"
-                            f"Если установлено как tool:\n"
-                            f"uv tool upgrade {PACKAGE_NAME}\n"
-                            f"{'!'*50}\n"
-                        )
+                        logger.warning(f"\n{'!'*50}\nUPDATE AVAILABLE: {latest} (current {VERSION})\nRun: uvx --refresh {PACKAGE_NAME}\n{'!'*50}")
     except: pass
 
 async def ensure_authorized():
@@ -131,10 +115,8 @@ async def ensure_authorized():
         if any(x in str(e) for x in ["AUTH_KEY_UNREGISTERED", "SESSION_REVOKED", "SESSION_EXPIRED"]):
             for ext in [".session", ".session-journal"]:
                 path = SESSION_FILE + ext
-                if os.path.exists(path):
-                    try: os.remove(path)
-                    except: pass
-        auth_session.update({"step": "config", "error": f"Ошибка: {e}"})
+                if os.path.exists(path): os.remove(path)
+        auth_session.update({"step": "config", "error": str(e)})
         await open_auth_page(); return False
     finally:
         if client and client.is_connected: await client.disconnect()
@@ -145,30 +127,36 @@ async def open_auth_page():
     webbrowser.open(url)
     if not config_update_future or config_update_future.done(): config_update_future = asyncio.Future()
 
+async def wait_for_auth():
+    global config_update_future
+    logger.info("Ожидание авторизации в браузере...")
+    try:
+        await asyncio.wait_for(config_update_future, 600.0)
+        return True
+    except: return False
+
 # --- Web ---
 
 async def handle_auth_get(request):
     s, err = auth_session["step"], auth_session["error"]
     err_html = f'<div style="color:#ff4d4d;background:rgba(255,0,0,0.1);padding:15px;border-radius:10px;margin-bottom:20px;border:1px solid #ff4d4d">{err}</div>' if err else ""
     forms = {
-        "config": '<h2>1. API Ключи</h2><p style="color:#94a3b8;font-size:12px">Данные сохранятся в AppData</p><form action="/auth/config" method="post"><label>API ID</label><input type="text" name="api_id" required><label>API HASH</label><input type="text" name="api_hash" required><button class="btn">Сохранить</button></form>',
-        "phone": '<h2>2. Телефон</h2><form action="/auth/phone" method="post"><label>Номер телефона</label><input type="text" name="phone" placeholder="+7..." required autofocus><button class="btn">Получить код</button></form>',
-        "code": '<h2>3. Код подтверждения</h2><form action="/auth/code" method="post"><label>Код из Telegram</label><input type="text" name="code" required autofocus><button class="btn">Войти</button></form>',
-        "password": '<h2>4. Облачный пароль</h2><form action="/auth/password" method="post"><label>Пароль (2FA)</label><input type="password" name="password" required autofocus><button class="btn">Подтвердить</button></form>',
-        "done": '<h2>✅ Успешно!</h2><p>Вы вошли. Можно закрыть вкладку.</p>'
+        "config": '<h2>1. API Setup</h2><p style="color:#94a3b8;font-size:12px">Data stored in AppData</p><form action="/auth/config" method="post"><label>API ID</label><input type="text" name="api_id" required><label>API HASH</label><input type="text" name="api_hash" required><button class="btn">Save</button></form>',
+        "phone": '<h2>2. Phone</h2><form action="/auth/phone" method="post"><label>Number</label><input type="text" name="phone" placeholder="+7..." required autofocus><button class="btn">Get Code</button></form>',
+        "code": '<h2>3. Code</h2><form action="/auth/code" method="post"><label>Telegram Code</label><input type="text" name="code" required autofocus><button class="btn">Login</button></form>',
+        "password": '<h2>4. 2FA Password</h2><form action="/auth/password" method="post"><label>Password</label><input type="password" name="password" required autofocus><button class="btn">Confirm</button></form>',
+        "done": '<h2>✅ Authorized!</h2><p>You can close this tab now.</p>'
     }
-    content = forms.get(s, forms["config"])
-    return web.Response(text=f'<!DOCTYPE html><html><head><meta charset="utf-8"><title>Auth</title><style>body{{font-family:sans-serif;background:#0f172a;color:white;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}}.container{{background:#1e293b;padding:40px;border-radius:20px;width:350px;box-shadow:0 20px 50px rgba(0,0,0,0.5);border:1px solid #334155}}label{{display:block;margin:15px 0 5px;color:#94a3b8;font-size:14px}}input{{width:100%;padding:12px;background:#0f172a;border:1px solid #334155;border-radius:10px;color:white;box-sizing:border-box;font-size:16px}}.btn{{width:100%;background:#0284c7;color:white;border:none;padding:15px;border-radius:10px;margin-top:20px;cursor:pointer;font-weight:bold}}</style></head><body><div class="container">{err_html}{content}</div></body></html>', content_type='text/html')
+    return web.Response(text=f'<!DOCTYPE html><html><head><meta charset="utf-8"><title>Auth</title><style>body{{font-family:sans-serif;background:#0f172a;color:white;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}}.container{{background:#1e293b;padding:40px;border-radius:20px;width:350px;box-shadow:0 20px 50px rgba(0,0,0,0.5);border:1px solid #334155}}label{{display:block;margin:15px 0 5px;color:#94a3b8;font-size:14px}}input{{width:100%;padding:12px;background:#0f172a;border:1px solid #334155;border-radius:10px;color:white;box-sizing:border-box;font-size:16px}}.btn{{width:100%;background:#0284c7;color:white;border:none;padding:15px;border-radius:10px;margin-top:20px;cursor:pointer;font-weight:bold}}</style></head><body><div class="container">{err_html}{forms.get(s, forms["config"])}</div></body></html>', content_type='text/html')
 
 async def handle_auth_config(request):
     d = await request.post(); aid, ah = str(d.get('api_id','')).strip(), str(d.get('api_hash','')).strip()
     if aid.isdigit() and len(ah)>10:
-        set_key(ENV_FILE, "TG_API_ID", aid); set_key(ENV_FILE, "TG_API_HASH", ah)
-        os.environ.update({"TG_API_ID": aid, "TG_API_HASH": ah})
+        set_key(ENV_FILE, "TG_API_ID", aid); set_key(ENV_FILE, "TG_API_HASH", ah); os.environ.update({"TG_API_ID": aid, "TG_API_HASH": ah})
         auth_session.update({"step": "phone", "error": None})
         if auth_session["client"]: await auth_session["client"].disconnect()
         auth_session["client"] = get_tg_client()
-    else: auth_session["error"] = "Некорректные данные"
+    else: auth_session["error"] = "Invalid API data"
     return web.HTTPFound('/auth')
 
 async def handle_auth_phone(request):
@@ -183,8 +171,7 @@ async def handle_auth_phone(request):
     return web.HTTPFound('/auth')
 
 async def handle_auth_code(request):
-    d = await request.post(); code = str(d.get('code','')).strip()
-    c = auth_session["client"]
+    d = await request.post(); code = str(d.get('code','')).strip(); c = auth_session["client"]
     try:
         await c.sign_in(auth_session["phone"], auth_session["phone_code_hash"], code)
         auth_session.update({"step": "done", "error": None})
@@ -195,8 +182,7 @@ async def handle_auth_code(request):
     return web.HTTPFound('/auth')
 
 async def handle_auth_password(request):
-    d = await request.post(); pw = str(d.get('password','')).strip()
-    c = auth_session["client"]
+    d = await request.post(); pw = str(d.get('password','')).strip(); c = auth_session["client"]
     try:
         await c.check_password(pw); auth_session.update({"step": "done", "error": None})
         if config_update_future and not config_update_future.done(): config_update_future.set_result(True)
@@ -204,7 +190,7 @@ async def handle_auth_password(request):
     except Exception as e: auth_session["error"] = str(e)
     return web.HTTPFound('/auth')
 
-# --- Logic ---
+# --- MCP Tool Logic ---
 
 async def start_web_server():
     global web_app_runner, web_server_port
@@ -222,20 +208,20 @@ async def start_web_server():
 
 @mcp.tool()
 async def search_and_select_emoji(emoticons: list[str], limit: int = 10, pack_name: str = None, is_animated: bool = None) -> dict:
-    """Поиск кастомных эмодзи с интерактивным выбором."""
+    """Search for custom Telegram emojis and open a browser UI for user selection. IMPORTANT: Use only basic Unicode emojis as search terms (e.g. ❌, 🔴, 💎)."""
     global selected_emoji_future
     cleanup_downloads(); await check_for_updates()
-    if not await ensure_authorized():
-        try: await asyncio.wait_for(config_update_future, 600.0)
-        except: return {"error": "Таймаут авторизации"}
+    if not await ensure_authorized() and not await wait_for_auth(): return {"error": "Auth failed"}
     app = get_tg_client()
     async with app:
         try:
             ids = []
             for em in emoticons:
-                res = await app.invoke(SearchCustomEmoji(emoticon=em, hash=0))
-                if isinstance(res, EmojiList) and res.document_id: ids.extend(res.document_id[:limit])
-            if not ids: return {"error": "Не найдено"}
+                try:
+                    res = await app.invoke(SearchCustomEmoji(emoticon=em, hash=0))
+                    if isinstance(res, EmojiList) and res.document_id: ids.extend(res.document_id[:limit])
+                except pyrogram.errors.Unauthorized: await ensure_authorized(); await wait_for_auth()
+            if not ids: return {"error": "Not found"}
             docs = await app.invoke(GetCustomEmojiDocuments(document_id=list(set(ids))))
             details = []
             for d in docs:
@@ -249,45 +235,44 @@ async def search_and_select_emoji(emoticons: list[str], limit: int = 10, pack_na
                         except: pass
                 mime = getattr(d, 'mime_type', '')
                 is_anim = mime in ('video/webm', 'application/x-tgsticker')
-                if pack_name and pack_name.lower() not in p_name.lower(): continue
-                if is_animated is not None and is_animated != is_anim: continue
+                if (pack_name and pack_name.lower() not in p_name.lower()) or (is_animated is not None and is_animated != is_anim): continue
                 ext = ".webm" if mime == 'video/webm' else (".tgs" if mime == 'application/x-tgsticker' else ".webp")
                 df = await app.download_media(FileId(file_type=FileType.STICKER, dc_id=d.dc_id, media_id=d.id, access_hash=d.access_hash, file_reference=d.file_reference).encode(), file_name=os.path.join(DOWNLOADS_DIR, f"emoji_{d.id}{ext}"))
                 details.append({"id": str(d.id), "base_emoji": alt, "pack_name": p_name, "is_animated": is_anim, "local_file_path": os.path.abspath(df)})
+            if not details: return {"error": "No results after filtering"}
             
-            if not details: return {"error": "Нет результатов"}
             h = ""
             for i in details:
                 fn = os.path.basename(i['local_file_path']); ext = os.path.splitext(fn)[1]
                 media = f"<video autoplay loop muted src='{fn}'></video>" if ext=='.webm' else (f"<img src='{fn}'>" if ext!='.tgs' else f"<div id='l_{i['id']}'></div><script>lottie.loadAnimation({{container:document.getElementById('l_{i['id']}'),renderer:'svg',loop:true,autoplay:true,animationData:{gzip.open(i['local_file_path'],'rt').read()}}})</script>")
                 h += f"<div class='card' onclick='t(\"{i['id']}\")' id='c_{i['id']}'><input type='checkbox' style='display:none' id='i_{i['id']}' data-id='{i['id']}' data-base='{i['base_emoji']}'>{media}</div>"
-            
             with open(os.path.join(DOWNLOADS_DIR, "index.html"), "w", encoding="utf-8") as f:
-                f.write(f"<!DOCTYPE html><html><head><meta charset='utf-8'><script src='https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.12.2/lottie.min.js'></script><style>body{{background:#1e1e1e;color:white;font-family:sans-serif;padding:20px}}.grid{{display:flex;flex-wrap:wrap;gap:10px}}.card{{background:#2d2d2d;padding:10px;border-radius:10px;cursor:pointer;border:2px solid transparent;width:80px;height:80px;display:flex;align-items:center;justify-content:center}}video,img,div{{max-width:60px;max-height:60px}}.selected{{border-color:#4da6ff;background:#3d3d3d}}.header{{display:flex;justify-content:space-between;margin-bottom:20px;position:sticky;top:0;background:#1e1e1e;padding:10px 0;border-bottom:1px solid #333}}.btn{{background:#4da6ff;color:white;border:none;padding:10px 20px;border-radius:5px;cursor:pointer;font-weight:bold}}</style></head><body><div class='header'><h2>Выбор</h2><button onclick='s()' class='btn'>Готово</button></div><div class='grid'>{h}</div><script>function t(id){{const c=document.getElementById('c_'+id),i=document.getElementById('i_'+id);i.checked=!i.checked;c.classList.toggle('selected',i.checked)}}async function s(){{const res=[];document.querySelectorAll('input:checked').forEach(i=>res.push({{id:i.dataset.id,base_emoji:i.dataset.base}}));if(!res.length)return alert('Выберите!');await fetch('/select',{{method:'POST',body:JSON.stringify({{selections:res}})}});window.close()}}</script></body></html>")
+                f.write(f"<!DOCTYPE html><html><head><meta charset='utf-8'><script src='https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.12.2/lottie.min.js'></script><style>body{{background:#1e1e1e;color:white;font-family:sans-serif;padding:20px}}.grid{{display:flex;flex-wrap:wrap;gap:10px}}.card{{background:#2d2d2d;padding:10px;border-radius:10px;cursor:pointer;border:2px solid transparent;width:80px;height:80px;display:flex;align-items:center;justify-content:center}}video,img,div{{max-width:60px;max-height:60px}}.selected{{border-color:#4da6ff;background:#3d3d3d}}.header{{display:flex;justify-content:space-between;margin-bottom:20px;position:sticky;top:0;background:#1e1e1e;padding:10px 0;border-bottom:1px solid #333}}.btn{{background:#4da6ff;color:white;border:none;padding:10px 20px;border-radius:5px;cursor:pointer;font-weight:bold}}</style></head><body><div class='header'><h2>Selection</h2><button onclick='s()' class='btn'>Done</button></div><div class='grid'>{h}</div><script>function t(id){{const c=document.getElementById('c_'+id),i=document.getElementById('i_'+id);i.checked=!i.checked;c.classList.toggle('selected',i.checked)}}async function s(){{const res=[];document.querySelectorAll('input:checked').forEach(i=>res.push({{id:i.dataset.id,base_emoji:i.dataset.base}}));if(!res.length)return alert('Select one!');await fetch('/select',{{method:'POST',body:JSON.stringify({{selections:res}})}});window.close()}}</script></body></html>")
             
             base = f"http://127.0.0.1:{web_server_port}" if web_app_runner else await start_web_server()
             webbrowser.open(f"{base}/static/index.html")
             selected_emoji_future = asyncio.Future()
             try:
-                res_task = await asyncio.wait_for(selected_emoji_future, 300.0)
-                res = await res_task
+                res = await (await asyncio.wait_for(selected_emoji_future, 300.0))
                 cleanup_downloads(); return {"status": "success", "selected_emojis": res.get("selections", [])}
-            except: return {"error": "Таймаут"}
+            except: return {"error": "Timeout"}
         except Exception as e: return {"error": str(e)}
 
 @mcp.tool()
 async def search_emoji_auto(emoticons: list[str], limit: int = 5, pack_name: str = None, is_animated: bool = None) -> dict:
-    """Прямой поиск без интерактивного выбора."""
+    """Non-interactive search for custom Telegram emojis. Returns a raw list of results. Use only basic Unicode emojis as search terms (e.g. ❌, 🔴, 💎)."""
     await check_for_updates()
-    if not await ensure_authorized(): return {"error": "Нужна авторизация"}
+    if not await ensure_authorized() and not await wait_for_auth(): return {"error": "Auth failed"}
     app = get_tg_client()
     async with app:
         try:
             ids = []
             for em in emoticons:
-                res = await app.invoke(SearchCustomEmoji(emoticon=em, hash=0))
-                if isinstance(res, EmojiList) and res.document_id: ids.extend(res.document_id[:limit])
-            if not ids: return {"error": "Не найдено"}
+                try:
+                    res = await app.invoke(SearchCustomEmoji(emoticon=em, hash=0))
+                    if isinstance(res, EmojiList) and res.document_id: ids.extend(res.document_id[:limit])
+                except pyrogram.errors.Unauthorized: await ensure_authorized(); await wait_for_auth()
+            if not ids: return {"error": "Not found"}
             docs = await app.invoke(GetCustomEmojiDocuments(document_id=list(set(ids))))
             results = []
             for d in docs:
@@ -301,15 +286,13 @@ async def search_emoji_auto(emoticons: list[str], limit: int = 5, pack_name: str
                         except: pass
                 mime = getattr(d, 'mime_type', '')
                 is_anim = mime in ('video/webm', 'application/x-tgsticker')
-                if pack_name and pack_name.lower() not in p_name.lower(): continue
-                if is_animated is not None and is_animated != is_anim: continue
+                if (pack_name and pack_name.lower() not in p_name.lower()) or (is_animated is not None and is_animated != is_anim): continue
                 results.append({"id": str(d.id), "base_emoji": alt, "pack_name": p_name, "is_animated": is_anim})
             return {"status": "success", "results": results}
         except Exception as e: return {"error": str(e)}
 
 def main():
-    logger.info(f"Запуск Remoji TG MCP v{VERSION}")
-    logger.info(f"Путь к данным: {BASE_DIR}")
+    logger.info(f"Remoji TG MCP v{VERSION}. Data path: {BASE_DIR}")
     cleanup_downloads(); mcp.run()
 
 if __name__ == "__main__": main()
